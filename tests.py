@@ -27,6 +27,17 @@ class SimpleCallsTestCase(unittest.TestCase):
             yield i+j
         
         self.failUnlessEqual(list(f('[', j=']')), ['[]'])
+    
+    def test_exception_passing(self):
+        @async
+        def f():
+            raise ValueError('blah')
+        
+        try:
+            f()
+            self.fail('did not raise exception')
+        except ValueError, e:
+            self.failUnless('blah' in str(e))
 
 class WithSingleInputTestCase(unittest.TestCase):
     """
@@ -56,17 +67,6 @@ class WithSingleInputTestCase(unittest.TestCase):
             return (v*v for v in i)
         
         self.failUnlessEqual(list(f(i=g())), [1, 16, 81])
-    
-    def test_exception_passing(self):
-        @async
-        def f():
-            raise ValueError('blah')
-        
-        try:
-            f().next() # TODO: should not require .next() here!
-            self.fail('did not raise exception')
-        except ValueError, e:
-            self.failUnless('blah' in str(e))
     
     def test_missing_async_argument(self):
         @async('i')
@@ -120,6 +120,58 @@ class WithMultipleInputsTestCase(unittest.TestCase):
         )
         
         self.failUnlessEqual(list(out), [0, 0, 0])
+
+class MultipleWorkersTestCase(unittest.TestCase):
+    def test_two_workers(self):
+        import os
+        @async(workers=2)
+        def pid():
+            yield os.getpid()
+        
+        result = list(pid())
+        
+        self.failUnlessEqual(len(result), 2)
+        self.failIfEqual(result[0], result[1])
+    
+    def test_distributed_inputs(self):
+        @async('i', workers=3)
+        def echo(i):
+            for value in i:
+                yield value
+        
+        self.failUnlessEqual(sum(echo(i=range(100))), sum(range(100)))
+    
+    def test_uneven_lengths(self):
+        @async('length', workers=2)
+        def f(length):
+            for n in range(length.next()):
+                yield n
+        
+        output = list(f(length=[1, 19]))
+        self.failUnlessEqual(len(output), 20)
+    
+    def test_stop_after_one_exception(self):
+        @async('raises', workers=2)
+        def f(raises):
+            if raises.next():
+                raise TypeError
+            else:
+                while(True):
+                    yield 13
+        
+        gen = f(raises=[True, False])
+        
+        # wait for a TypeError
+        try:
+            output = list(gen)
+            self.fail('did not raise TypeError')
+        except TypeError:
+            pass
+        
+        # expect the generator to raise StopIteration from now on
+        self.failUnlessRaises(StopIteration, lambda: gen.next())
+        self.failUnlessRaises(StopIteration, lambda: gen.next())
+        self.failUnlessRaises(StopIteration, lambda: gen.next())
 
 if __name__ == '__main__':
     unittest.main()
