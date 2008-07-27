@@ -81,17 +81,17 @@ class WithSingleInputTestCase(unittest.TestCase):
 
 class GeneratorMapTestCase(unittest.TestCase):
     def test_equal_lengths(self):
-        g1 = [1, 2, 4].__iter__()
-        g2 = [1, 3, 3].__iter__()
-        g3 = [1, 4, 2].__iter__()
+        g1 = [1, 2, 4]
+        g2 = [1, 3, 3]
+        g3 = [1, 4, 2]
         
         g = generator_map(lambda a, b, c: a+b+c, g1, g2, g3)
         
         self.failUnlessEqual(list(g), [3, 9, 9])
     
     def test_different_lengths(self):
-        g1 = [1].__iter__()
-        g2 = [1, 2, 3].__iter__()
+        g1 = [1]
+        g2 = [1, 2, 3]
         
         def add(a, b):
             return (a if a else 0) + (b if b else 0)
@@ -105,6 +105,21 @@ class WithMultipleInputsTestCase(unittest.TestCase):
             return generator_map(lambda v1, v2: v1+v2, i1, i2)
         
         self.failUnlessEqual(list(f(i1=[1,2,3], i2=[3,2,1])), [4, 4, 4])
+    
+    def test_three_level_cascade(self):
+        @async('a', 'b')
+        def s(a, b):
+            return generator_map(lambda ai, bi: ai+bi, a, b)
+        
+        out = s(
+            a=s(
+                a=s(a=[1, 2, 3], b=[3, 2, 1]),
+                b=s(a=[-1, -2, -3], b=[7, 8, 9])
+            ),
+            b=s(a=[-7, -2, -1], b=[-3, -8, -9])
+        )
+        
+        self.failUnlessEqual(list(out), [0, 0, 0])
 
 if __name__ == '__main__':
     unittest.main()

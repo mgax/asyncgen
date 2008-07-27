@@ -1,27 +1,13 @@
 import pprocess
 
-def generator_map(func, *generators):
-    while True:
-        has_next = False
-        values = []
-        for g in generators:
-            try:
-                values.append(g.next())
-                has_next = True
-            except StopIteration:
-                values.append(None)
-        if not has_next:
-            raise StopIteration
-        yield func(*values)
-
-def _async_process(func, args, kwargs, inputs):
+def _async_process(func, args, kwargs, input_names):
     channel = pprocess.create()
     if channel.pid != 0:
         return channel
     
     try:
-        for i in inputs:
-            i.set_channel(channel)
+        for i in input_names:
+            kwargs[i].set_channel(channel)
         
         gen = func(*args, **kwargs)
         try:
@@ -39,16 +25,21 @@ def _async_process(func, args, kwargs, inputs):
         pprocess.exit(channel)
 
 class AsyncJob(object):
-    def __init__(self, func, args, kwargs, async_kwargs={}):
-        async_inputs = {}
+    def __init__(self, func, args, kwargs, input_names):
         self.input = {}
         
-        for key, value in async_kwargs.iteritems():
-            async_inputs[key] = AsyncInput(key)
-            self.input[key] = value.__iter__()
+        for name in input_names:
+            try:
+                gen = kwargs[name]
+            except KeyError:
+                raise ValueError('Did not find async input named "%s" - did you pass it as a named argument?' % name)
+            if '__iter__' not in dir(gen):
+                raise TypeError('Expected all the async inputs to be generators')
+            
+            kwargs[name] = AsyncInput(name)
+            self.input[name] = gen.__iter__()
         
-        kwargs = dict(kwargs, **async_inputs)
-        self.channel = _async_process(func, args, kwargs, async_inputs.values())
+        self.channel = _async_process(func, args, kwargs, input_names)
     
     def __iter__(self):
         return self
@@ -70,30 +61,6 @@ class AsyncJob(object):
         else:
             raise v
 
-def async(*input_names, **async_kwargs):
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            input_generators = {}
-            for name in input_names:
-                try:
-                    gen = kwargs[name]
-                except KeyError:
-                    # TODO: testme
-                    raise ValueError('Did not find async input named "%s" - did you pass it as a named argument?' % name)
-                if '__iter__' not in dir(gen):
-                    raise TypeError('Expected all the async inputs to be generators')
-                input_generators[name] = gen
-                del kwargs[name]
-            return AsyncJob(func, args, kwargs, input_generators)
-        return wrapper
-    
-    if len(input_names) == 1 and len(async_kwargs) == 0 and '__call__' in dir(input_names[0]):
-        func = input_names[0]
-        input_names = []
-        return decorator(func)
-    else:
-        return decorator
-
 class AsyncInput(object):
     def __init__(self, key):
         self.key = key
@@ -111,3 +78,35 @@ class AsyncInput(object):
             return v
         else:
             raise v
+
+def async(*input_names, **kwargs):
+    def decorator(func):
+        # pop all expected keyword arguments
+        if kwargs:
+            raise TypeError("async() got an unexpected keyword argument '%s'" % kwargs.keys()[0])
+        
+        def wrapper(*args, **kwargs):
+            return AsyncJob(func, args, kwargs, input_names)
+        return wrapper
+    
+    if len(input_names) == 1 and len(kwargs) == 0 and '__call__' in dir(input_names[0]):
+        func = input_names[0]
+        input_names = []
+        return decorator(func)
+    else:
+        return decorator
+
+def generator_map(func, *inputs):
+    generators = list(i.__iter__() for i in inputs)
+    while True:
+        has_next = False
+        values = []
+        for g in generators:
+            try:
+                values.append(g.next())
+                has_next = True
+            except StopIteration:
+                values.append(None)
+        if not has_next:
+            raise StopIteration
+        yield func(*values)
