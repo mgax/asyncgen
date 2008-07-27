@@ -202,5 +202,37 @@ class ResultBufferingTestCase(unittest.TestCase):
         list(consumer(l=logger('c'), numbers=producer(l=logger('p'))))
         self.failUnlessEqual(''.join(log), 'ppppcpcpcpcpcpcpcccc')
 
+class PickeTestCase(unittest.TestCase):
+    def setUp(self):
+        self.pickle_log = []
+        
+        import cPickle
+        import asyncgen
+        
+        real_load = cPickle.load
+        def _load(file):
+            self.pickle_log.append('u')
+            return cPickle.load(file)
+        asyncgen.pickle_load = _load
+    
+    def test_simple_pickle(self):
+        
+        @async(tempfile_output=True)
+        def f():
+            yield 1
+            yield 2
+        
+        self.failUnlessEqual(list(f()), [1, 2])
+        self.failUnlessEqual(''.join(self.pickle_log), 'uu')
+    
+    def test_pickle_chain(self):
+        @async('i', tempfile_output=True)
+        def f(i):
+            for val in i:
+                yield val+1
+        
+        self.failUnlessEqual(list(f(i=f(i=[1,2,3]))), [3, 4, 5])
+        self.failUnlessEqual(''.join(self.pickle_log), 'uuu')
+
 if __name__ == '__main__':
     unittest.main()

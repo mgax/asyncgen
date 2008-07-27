@@ -1,6 +1,15 @@
+import tempfile
+import os
+from cPickle import dump as pickle_dump, load as pickle_load
+
 import pprocess
 
-def _async_process(func, args, kwargs, input_names):
+def _unpickle_and_remove(f):
+    data = pickle_load(open(f, 'rb'))
+    os.remove(f)
+    return data
+
+def _async_process(func, args, kwargs, input_names, tempfile_output):
     channel = pprocess.create()
     if channel.pid != 0:
         return channel
@@ -18,6 +27,10 @@ def _async_process(func, args, kwargs, input_names):
                 if cmd == 'pull_output':
                     try:
                         v = gen.next()
+                        if tempfile_output:
+                            f = tempfile.mkstemp()[1]
+                            pickle_dump(v, open(f, 'wb'))
+                            v = f
                         channel.send(('next_value', v))
                     except StopIteration, e:
                         channel.send(('stop_iteration', e))
@@ -77,8 +90,12 @@ class AsyncInput(object):
         t, v = self.channel.receive()
         if t == 'next':
             return v
-        else:
+        elif t == 'next_tempfile':
+            return _unpickle_and_remove(v)
+        elif t == 'exception':
             raise v
+        else:
+            raise NotImplemented
 
 _async_job_global_queue = WorkerQueue()
 class AsyncJob(object):
@@ -88,6 +105,7 @@ class AsyncJob(object):
         self.workers_waiting_input = []
         self.ready_data = []
         self.buffer_size = options['buffer_size']
+        self.tempfile_output = options['tempfile_output']
         self.worker_queue = _async_job_global_queue
         self.worker_queue.register(self)
         self.input = {}
@@ -111,7 +129,7 @@ class AsyncJob(object):
             self.worker_queue.add(channel)
     
     def launch_worker(self, func, args, kwargs, input_names):
-        channel = _async_process(func, args, kwargs, input_names)
+        channel = _async_process(func, args, kwargs, input_names, self.tempfile_output)
         t, v = channel.receive()
         
         if t == 'ready':
@@ -143,8 +161,13 @@ class AsyncJob(object):
         while self.workers_waiting_input:
             worker, name = self.workers_waiting_input.pop()
             try:
-                v = self.input[name].next()
-                worker.send(('next', v))
+                input_source = self.input[name]
+                if isinstance(input_source, AsyncJob) and input_source.tempfile_output:
+                    v = input_source._get_output(skip_tempfile=True)
+                    worker.send(('next_tempfile', v))
+                else:
+                    v = input_source.next()
+                    worker.send(('next', v))
             except Exception, e:
                 worker.send(('exception', e))
     
@@ -169,7 +192,7 @@ class AsyncJob(object):
     def __iter__(self):
         return self
     
-    def next(self):
+    def _get_output(self, skip_tempfile=False):
         self.waiting_data += 1
         while not (self.ready_data or self.stop_iteration):
             self.worker_queue.tick()
@@ -180,18 +203,25 @@ class AsyncJob(object):
         
         t, v = self.ready_data.pop()
         if t == 'next':
-            return v
+            if self.tempfile_output and not skip_tempfile:
+                return _unpickle_and_remove(v)
+            else:
+                return v
         elif t == 'exception':
             self.stop_iteration = True
             raise v
         else:
             raise NotImplementedError
+    
+    def next(self):
+        return self._get_output()
 
 def async(*input_names, **kwargs):
     def decorator(func):
         options = {
             'workers': kwargs.pop('workers', 1),
             'buffer_size': kwargs.pop('buffer', 0),
+            'tempfile_output': kwargs.pop('tempfile_output', False),
         }
         if kwargs:
             raise TypeError("async() got an unexpected keyword argument '%s'" % kwargs.keys()[0])
