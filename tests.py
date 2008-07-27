@@ -94,7 +94,10 @@ class GeneratorMapTestCase(unittest.TestCase):
         g2 = [1, 2, 3]
         
         def add(a, b):
-            return (a if a else 0) + (b if b else 0)
+            # return (a if a else 0) + (b if b else 0)
+            if not a: a = 0
+            if not b: b = 0
+            return a + b
         
         self.failUnlessEqual(list(generator_map(add, g1, g2)), [2, 2, 3])
 
@@ -179,7 +182,7 @@ class ResultBufferingTestCase(unittest.TestCase):
         def logger(s):
             while True:
                 log.append(s)
-                yield
+                yield None
         
         @async('l', buffer=4)
         def producer(l):
@@ -194,7 +197,7 @@ class ResultBufferingTestCase(unittest.TestCase):
                 time.sleep(.01)
                 c = numbers.next()
                 l.next()
-            yield
+            yield None
         
         list(consumer(l=logger('c'), numbers=producer(l=logger('p'))))
         self.failUnlessEqual(''.join(log), 'ppppcpcpcpcpcpcpcccc')

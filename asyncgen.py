@@ -9,24 +9,25 @@ def _async_process(func, args, kwargs, input_names):
         kwargs[i].set_channel(channel)
     
     try:
-        gen = func(*args, **kwargs).__iter__()
-        channel.send(('ready', None))
+        try:
+            gen = func(*args, **kwargs).__iter__()
+            channel.send(('ready', None))
+            
+            while(True):
+                cmd = channel.receive()
+                if cmd == 'pull_output':
+                    try:
+                        v = gen.next()
+                        channel.send(('next_value', v))
+                    except StopIteration, e:
+                        channel.send(('stop_iteration', e))
+                elif cmd == 'quit':
+                    break
+                else:
+                    raise NotImplementedError('_async_process: command "%s" not implemented' % cmd)
         
-        while(True):
-            cmd = channel.receive()
-            if cmd == 'pull_output':
-                try:
-                    v = gen.next()
-                    channel.send(('next_value', v))
-                except StopIteration, e:
-                    channel.send(('stop_iteration', e))
-            elif cmd == 'quit':
-                break
-            else:
-                raise NotImplementedError('_async_process: command "%s" not implemented' % cmd)
-    
-    except Exception, e:
-        channel.send(('exception', e))
+        except Exception, e:
+            channel.send(('exception', e))
     
     finally:
         pprocess.exit(channel)
