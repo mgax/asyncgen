@@ -35,13 +35,19 @@ class WorkerQueue(pprocess.Exchange):
     def __init__(self, *args, **kwargs):
         pprocess.Exchange.__init__(self, *args, **kwargs)
         self.queue = []
+        self.jobs = []
     
     def store_data(self, channel):
         channel.worker.store_data()
     
     def tick(self):
+        for job in self.jobs:
+            job.do_pre_poll()
         if self.active():
             self.store()
+    
+    def register(self, job):
+        self.jobs.append(job)
 
 class Worker(object):
     def __init__(self, channel, job):
@@ -73,15 +79,19 @@ class AsyncInput(object):
         else:
             raise v
 
+_async_job_global_queue = WorkerQueue()
 class AsyncJob(object):
     def __init__(self, func, args, kwargs, input_names, options):
         self.idle_workers = []
+        self.busy_workers = []
         self.workers_waiting_input = []
         self.ready_data = []
-        self.n_workers = options['workers']
-        self.worker_queue = WorkerQueue()
+        self.buffer_size = options['buffer_size']
+        self.worker_queue = _async_job_global_queue
+        self.worker_queue.register(self)
         self.input = {}
-        self.exception_flag = False
+        self.waiting_data = 0
+        self.stop_iteration = False
         
         for name in input_names:
             try:
@@ -94,7 +104,7 @@ class AsyncJob(object):
             kwargs[name] = AsyncInput(name)
             self.input[name] = gen.__iter__()
         
-        for c in range(self.n_workers):
+        for c in range(options['workers']):
             channel = self.launch_worker(func, args, kwargs, input_names)
             self.idle_workers.insert(0, Worker(channel, self))
             self.worker_queue.add(channel)
@@ -107,14 +117,30 @@ class AsyncJob(object):
             return channel
         elif t == 'exception':
             raise v
+        elif t == 'pull_input':
+            # a worker function is requesting input before we pull anything
+            # from it; this means it's not a generator function.
+            raise NotImplementedError('All async functions must be generators')
         else:
             raise RuntimeError('Child process did not start up correctly')
     
-    def wait_for_workers(self):
-        self.worker_queue.tick()
-        waiting = self.workers_waiting_input
-        self.workers_waiting_input = []
-        for worker, name in waiting:
+    def do_pre_poll(self):
+        """
+        make sure no workers are blocking on us, to avoid deadlocks
+        """
+        
+        while self.idle_workers and \
+                (len(self.ready_data) + len(self.busy_workers)) \
+                < (self.buffer_size + self.waiting_data):
+            worker = self.idle_workers.pop()
+            self.busy_workers.append(worker)
+            worker.send('pull_output')
+        
+        if not (self.idle_workers or self.busy_workers or self.ready_data):
+            self.stop_iteration = True
+        
+        while self.workers_waiting_input:
+            worker, name = self.workers_waiting_input.pop()
             try:
                 v = self.input[name].next()
                 worker.send(('next', v))
@@ -124,56 +150,53 @@ class AsyncJob(object):
     def worker_has_message(self, worker, message):
         t, v = message
         if t == 'pull_input':
-            self.workers_waiting_input.append((worker, v))
+            self.workers_waiting_input.insert(0, (worker, v))
         elif t == 'next_value':
             self.ready_data.insert(0, ('next', v))
+            self.busy_workers.remove(worker)
             self.idle_workers.insert(0, worker)
         elif t == 'stop_iteration':
             worker.send('quit')
-            self.n_workers -= 1
-            if self.n_workers:
-                self.pull_value()
+            self.busy_workers.remove(worker)
+            self.worker_queue.remove(worker.channel)
+            self.do_pre_poll()
         elif t == 'exception':
             self.ready_data = [('exception', v)]
         else:
             raise NotImplementedError('AsyncJob.worker_has_message: message "%s" not implemented' % t)
     
-    def pull_value(self):
-        self.idle_workers.pop().send('pull_output')
-    
     def __iter__(self):
         return self
     
     def next(self):
-        if self.exception_flag:
-            raise StopIteration
+        self.waiting_data += 1
+        while not (self.ready_data or self.stop_iteration):
+            self.worker_queue.tick()
+        self.waiting_data -= 1
         
-        if not self.ready_data and self.n_workers:
-            self.pull_value()
-        
-        while self.n_workers and not self.ready_data:
-            self.wait_for_workers()
-        
-        if not self.n_workers:
+        if self.stop_iteration:
             raise StopIteration
         
         t, v = self.ready_data.pop()
         if t == 'next':
             return v
         elif t == 'exception':
-            self.exception_flag = True
+            self.stop_iteration = True
             raise v
         else:
             raise NotImplementedError
 
 def async(*input_names, **kwargs):
     def decorator(func):
-        workers = kwargs.pop('workers', 1)
+        options = {
+            'workers': kwargs.pop('workers', 1),
+            'buffer_size': kwargs.pop('buffer', 0),
+        }
         if kwargs:
             raise TypeError("async() got an unexpected keyword argument '%s'" % kwargs.keys()[0])
         
         def wrapper(*args, **kwargs):
-            return AsyncJob(func, args, kwargs, input_names, {'workers': workers})
+            return AsyncJob(func, args, kwargs, input_names, options)
         return wrapper
     
     if len(input_names) == 1 and len(kwargs) == 0 and '__call__' in dir(input_names[0]):

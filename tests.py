@@ -173,5 +173,31 @@ class MultipleWorkersTestCase(unittest.TestCase):
         self.failUnlessRaises(StopIteration, lambda: gen.next())
         self.failUnlessRaises(StopIteration, lambda: gen.next())
 
+class ResultBufferingTestCase(unittest.TestCase):
+    def test_with_sleep(self):
+        log = []
+        def logger(s):
+            while True:
+                log.append(s)
+                yield
+        
+        @async('l', buffer=4)
+        def producer(l):
+            for c in range(10):
+                l.next()
+                yield c
+        
+        @async('l', 'numbers')
+        def consumer(l, numbers):
+            import time
+            while True:
+                time.sleep(.01)
+                c = numbers.next()
+                l.next()
+            yield
+        
+        list(consumer(l=logger('c'), numbers=producer(l=logger('p'))))
+        self.failUnlessEqual(''.join(log), 'ppppcpcpcpcpcpcpcccc')
+
 if __name__ == '__main__':
     unittest.main()
