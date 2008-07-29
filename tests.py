@@ -1,6 +1,6 @@
 import unittest
 
-from asyncgen import async, generator_map
+from asyncgen import async, generator_map, generator_splitter
 
 class SimpleCallsTestCase(unittest.TestCase):
     """
@@ -78,6 +78,22 @@ class WithSingleInputTestCase(unittest.TestCase):
             self.fail('did not raise exception')
         except ValueError, e:
             self.failUnless('Did not find async input named "i"' in str(e))
+    
+    def test_exception_via_input(self):
+        def src():
+            yield 1
+            yield 2
+            raise TypeError
+        
+        @async('i')
+        def f(i):
+            try:
+                for v in i:
+                    yield v
+            except TypeError, e:
+                yield 'err'
+        
+        self.failUnlessEqual(list(f(i=src())), [1, 2, 'err'])
 
 class GeneratorMapTestCase(unittest.TestCase):
     def test_equal_lengths(self):
@@ -216,7 +232,6 @@ class PickeTestCase(unittest.TestCase):
         asyncgen.pickle_load = _load
     
     def test_simple_pickle(self):
-        
         @async(tempfile_output=True)
         def f():
             yield 1
@@ -233,6 +248,68 @@ class PickeTestCase(unittest.TestCase):
         
         self.failUnlessEqual(list(f(i=f(i=[1,2,3]))), [3, 4, 5])
         self.failUnlessEqual(''.join(self.pickle_log), 'uuu')
+
+class GeneratorSplitterTestCase(unittest.TestCase):
+    def test_split(self):
+        @async
+        def src():
+            yield (1, 'a') # tuple
+            yield {0:2, 1:'b'} # dict
+            yield [3, 'c'] # list
+        
+        @async('i')
+        def dst(i):
+            for v in i:
+                yield v
+        
+        gs = generator_splitter(src())
+        self.failUnlessEqual(list(dst(i=gs[0])), [1, 2, 3])
+        self.failUnlessEqual(list(dst(i=gs[1])), ['a', 'b', 'c'])
+    
+    def test_dict(self):
+        self.failUnlessEqual(list(generator_splitter([{'a':2}])['a']), [2])
+    
+    def test_bad_input(self):
+        try:
+            generator_splitter([13])[0].next()
+            self.fail('did not raise ValueError')
+        except ValueError, e:
+            self.failUnless('input received was neither dict nor sequence' in str(e))
+    
+    def test_bad_key(self):
+        try:
+            generator_splitter([{}])[0].next()
+            self.fail('did not raise KeyError')
+        except KeyError, e:
+            self.failUnless('the key you asked for, 0, was not received.' in str(e))
+    
+    def test_split_async(self):
+        import time
+        event_log = []
+        
+        def log(s):
+            while True:
+                event_log.append(s)
+                yield
+        
+        def src():
+            yield (0, 1, 3)
+            yield (4, 1, 0)
+            yield (0, 5, 0)
+        
+        @async('i', 'l', buffer=1)
+        def dst(i, l):
+            for v in i:
+                time.sleep(v/100.)
+                l.next()
+            yield
+        
+        gs = generator_splitter(src())
+        all_dst = list( dst(i=gs[i], l=log(n)) for i, n in enumerate('abc') )
+        for d in all_dst:
+            list(d)
+        
+        self.failUnlessEqual(''.join(event_log), 'abbcccaab')
 
 if __name__ == '__main__':
     unittest.main()

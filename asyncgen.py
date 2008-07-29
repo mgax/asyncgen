@@ -216,6 +216,56 @@ class AsyncJob(object):
     def next(self):
         return self._get_output()
 
+class SplitterOutput(object):
+    def __init__(self, splitter, key):
+        self.splitter = splitter
+        self.key = key
+    
+    def __iter__(self):
+        return self
+    
+    def next(self):
+        return self.splitter._pull(self.key)
+
+class Splitter(object):
+    def __init__(self, input_generator):
+        self.input = input_generator.__iter__()
+        self.queues = {}
+    
+    def get(self, key):
+        if key not in self.queues:
+            self.queues[key] = []
+        return SplitterOutput(self, key)
+    
+    def __getitem__(self, key):
+        return self.get(key)
+    
+    def _push_input_value(self, key, value):
+        if key not in self.queues:
+            self.queues[key] = []
+        self.queues[key].insert(0, value)
+    
+    def _pull_input(self):
+        data = self.input.next()
+        if 'keys' in dir(data):
+            keys = data.keys()
+        elif '__len__' in dir(data):
+            keys = range(len(data))
+        else:
+            raise ValueError('Splitter: input received was neither dict nor sequence')
+        
+        for key in keys:
+            self._push_input_value(key, data[key])
+    
+    def _pull(self, key):
+        queue = self.queues[key]
+        if not queue:
+            # note: this will raise StopIteration if the source data has run out
+            self._pull_input()
+        if not queue:
+            raise KeyError('Splitter: the key you asked for, %s, was not received.' % str(key))
+        return queue.pop()
+
 def async(*input_names, **kwargs):
     def decorator(func):
         options = {
@@ -236,6 +286,9 @@ def async(*input_names, **kwargs):
         return decorator(func)
     else:
         return decorator
+
+def generator_splitter(input_generator):
+    return Splitter(input_generator)
 
 def generator_map(func, *inputs):
     generators = list(i.__iter__() for i in inputs)
