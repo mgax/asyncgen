@@ -225,29 +225,64 @@ class PickeTestCase(unittest.TestCase):
         import cPickle
         import asyncgen
         
+        real_dump = cPickle.dump
+        def _dump(obj, file):
+            self.pickle_log.append('i')
+            return cPickle.dump(obj, file)
+        asyncgen.pickle_dump = _dump
+        
         real_load = cPickle.load
         def _load(file):
-            self.pickle_log.append('u')
+            self.pickle_log.append('o')
             return cPickle.load(file)
         asyncgen.pickle_load = _load
     
-    def test_simple_pickle(self):
+    def tearDown(self):
+        import cPickle
+        import asyncgen
+        asyncgen.pickle_dump = cPickle.dump
+        asyncgen.pickle_load = cPickle.load
+    
+    def test_pickle_output(self):
         @async(tempfile_output=True)
         def f():
             yield 1
             yield 2
         
         self.failUnlessEqual(list(f()), [1, 2])
-        self.failUnlessEqual(''.join(self.pickle_log), 'uu')
+        self.failUnlessEqual(''.join(self.pickle_log), 'oo')
+    
+    def test_pickle_input(self):
+        @async('i', tempfile_input=True)
+        def f(i):
+            for v in i:
+                yield v
+        
+        self.failUnlessEqual(list(f(i=[1, 2])), [1, 2])
+        self.failUnlessEqual(''.join(self.pickle_log), 'ii')
+    
+    def test_pickle_no_chain(self):
+        @async('i', tempfile_input=True)
+        def f(i):
+            for val in i:
+                yield val+1
+        
+        @async('i', tempfile_input=True, tempfile_output=True)
+        def g(i):
+            for val in i:
+                yield val+1
+        
+        self.failUnlessEqual(list(g(i=f(i=[1,2,3]))), [3, 4, 5])
+        self.failUnlessEqual(''.join(self.pickle_log), 'iioiioiio')
     
     def test_pickle_chain(self):
-        @async('i', tempfile_output=True)
+        @async('i', tempfile_output=True, tempfile_input=True)
         def f(i):
             for val in i:
                 yield val+1
         
         self.failUnlessEqual(list(f(i=f(i=[1,2,3]))), [3, 4, 5])
-        self.failUnlessEqual(''.join(self.pickle_log), 'uuu')
+        self.failUnlessEqual(''.join(self.pickle_log), 'ioioio')
 
 class GeneratorSplitterTestCase(unittest.TestCase):
     def test_split(self):

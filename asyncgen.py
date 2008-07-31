@@ -114,6 +114,7 @@ class AsyncJob(object):
         self.workers_waiting_input = []
         self.ready_data = []
         self.buffer_size = options['buffer_size']
+        self.tempfile_input = options['tempfile_input']
         self.tempfile_output = options['tempfile_output']
         self.worker_queue = _async_job_global_queue
         self.worker_queue.register(self)
@@ -174,12 +175,14 @@ class AsyncJob(object):
             worker, name = self.workers_waiting_input.pop()
             try:
                 input_source = self.input[name]
-                if isinstance(input_source, AsyncJob) and input_source.tempfile_output:
-                    v = input_source.next(want_tempfile=True)
+                if self.tempfile_input:
+                    if isinstance(input_source, AsyncJob) and input_source.tempfile_output:
+                        v = input_source.next(want_tempfile=True)
+                    else:
+                        v = _pickle_and_return_filename(input_source.next())
                     worker.send(('next_input_tempfile', v))
                 else:
-                    v = input_source.next()
-                    worker.send(('next_input', v))
+                    worker.send(('next_input', input_source.next()))
             except Exception, e:
                 worker.send(('exception', e))
     
@@ -299,6 +302,7 @@ def async(*input_names, **kwargs):
         options = {
             'workers': kwargs.pop('workers', 1),
             'buffer_size': kwargs.pop('buffer', 0),
+            'tempfile_input': kwargs.pop('tempfile_input', False),
             'tempfile_output': kwargs.pop('tempfile_output', False),
         }
         if kwargs:
