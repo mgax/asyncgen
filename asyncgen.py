@@ -4,12 +4,17 @@ from cPickle import dump as pickle_dump, load as pickle_load
 
 import pprocess
 
-def _unpickle_and_remove(f):
+def _unpickle_and_remove_file(f):
     data = pickle_load(open(f, 'rb'))
     os.remove(f)
     return data
 
-def _async_process(func, args, kwargs, input_names, tempfile_output):
+def _pickle_and_return_filename(data):
+    f = tempfile.mkstemp()[1]
+    pickle_dump(data, open(f, 'wb'))
+    return f
+
+def _async_process(func, args, kwargs, input_names):
     channel = pprocess.create()
     if channel.pid != 0:
         return channel
@@ -22,18 +27,22 @@ def _async_process(func, args, kwargs, input_names, tempfile_output):
             gen = func(*args, **kwargs).__iter__()
             channel.send(('ready', None))
             
+            def get_next_value(tempfile_output=False):
+                try:
+                    v = gen.next()
+                    if tempfile_output:
+                        return ('next_value_tempfile', _pickle_and_return_filename(v))
+                    else:
+                        return ('next_value', v)
+                except StopIteration, e:
+                    return ('stop_iteration', e)
+            
             while(True):
                 cmd = channel.receive()
                 if cmd == 'pull_output':
-                    try:
-                        v = gen.next()
-                        if tempfile_output:
-                            f = tempfile.mkstemp()[1]
-                            pickle_dump(v, open(f, 'wb'))
-                            v = f
-                        channel.send(('next_value', v))
-                    except StopIteration, e:
-                        channel.send(('stop_iteration', e))
+                    channel.send(get_next_value())
+                elif cmd == 'pull_output_tempfile':
+                    channel.send(get_next_value(tempfile_output=True))
                 elif cmd == 'quit':
                     break
                 else:
@@ -44,6 +53,28 @@ def _async_process(func, args, kwargs, input_names, tempfile_output):
     
     finally:
         pprocess.exit(channel)
+
+class AsyncInput(object):
+    def __init__(self, key):
+        self.key = key
+    
+    def set_channel(self, channel):
+        self.channel = channel
+    
+    def __iter__(self):
+        return self
+    
+    def next(self):
+        self.channel.send(('pull_input', self.key))
+        t, v = self.channel.receive()
+        if t == 'next_input':
+            return v
+        elif t == 'next_input_tempfile':
+            return _unpickle_and_remove_file(v)
+        elif t == 'exception':
+            raise v
+        else:
+            raise NotImplemented
 
 class WorkerQueue(pprocess.Exchange):
     def __init__(self, *args, **kwargs):
@@ -74,28 +105,6 @@ class Worker(object):
     
     def store_data(self):
         self.job.worker_has_message(self, self.channel.receive())
-
-class AsyncInput(object):
-    def __init__(self, key):
-        self.key = key
-    
-    def set_channel(self, channel):
-        self.channel = channel
-    
-    def __iter__(self):
-        return self
-    
-    def next(self):
-        self.channel.send(('pull_input', self.key))
-        t, v = self.channel.receive()
-        if t == 'next':
-            return v
-        elif t == 'next_tempfile':
-            return _unpickle_and_remove(v)
-        elif t == 'exception':
-            raise v
-        else:
-            raise NotImplemented
 
 _async_job_global_queue = WorkerQueue()
 class AsyncJob(object):
@@ -129,7 +138,7 @@ class AsyncJob(object):
             self.worker_queue.add(channel)
     
     def launch_worker(self, func, args, kwargs, input_names):
-        channel = _async_process(func, args, kwargs, input_names, self.tempfile_output)
+        channel = _async_process(func, args, kwargs, input_names)
         t, v = channel.receive()
         
         if t == 'ready':
@@ -153,7 +162,10 @@ class AsyncJob(object):
                 < (self.buffer_size + self.waiting_data):
             worker = self.idle_workers.pop()
             self.busy_workers.append(worker)
-            worker.send('pull_output')
+            if self.tempfile_output:
+                worker.send('pull_output_tempfile')
+            else:
+                worker.send('pull_output')
         
         if not (self.idle_workers or self.busy_workers or self.ready_data):
             self.stop_iteration = True
@@ -163,11 +175,11 @@ class AsyncJob(object):
             try:
                 input_source = self.input[name]
                 if isinstance(input_source, AsyncJob) and input_source.tempfile_output:
-                    v = input_source.next(skip_tempfile=True)
-                    worker.send(('next_tempfile', v))
+                    v = input_source.next(want_tempfile=True)
+                    worker.send(('next_input_tempfile', v))
                 else:
                     v = input_source.next()
-                    worker.send(('next', v))
+                    worker.send(('next_input', v))
             except Exception, e:
                 worker.send(('exception', e))
     
@@ -175,8 +187,8 @@ class AsyncJob(object):
         t, v = message
         if t == 'pull_input':
             self.workers_waiting_input.insert(0, (worker, v))
-        elif t == 'next_value':
-            self.ready_data.insert(0, ('next', v))
+        elif t in ('next_value', 'next_value_tempfile'):
+            self.ready_data.insert(0, (t, v))
             self.busy_workers.remove(worker)
             self.idle_workers.insert(0, worker)
         elif t == 'stop_iteration':
@@ -199,28 +211,33 @@ class AsyncJob(object):
         while not (self.ready_data or self.stop_iteration or callback()):
             self.worker_queue.tick()
     
-    def _get_data(self, skip_tempfile=False):
+    def _get_data(self, want_tempfile=False):
         self.waiting_data -= 1
         
         if self.stop_iteration:
             raise StopIteration
         
         t, v = self.ready_data.pop()
-        if t == 'next':
-            if self.tempfile_output and not skip_tempfile:
-                return _unpickle_and_remove(v)
+        if t == 'next_value':
+            if want_tempfile:
+                raise RuntimeError('tempfile data was requested; worker returned normal data')
             else:
                 return v
+        elif t == 'next_value_tempfile':
+            if want_tempfile:
+                return v
+            else:
+                return _unpickle_and_remove_file(v)
         elif t == 'exception':
             self.stop_iteration = True
             raise v
         else:
             raise NotImplementedError
     
-    def next(self, skip_tempfile=False):
+    def next(self, want_tempfile=False):
         self._request_data()
         self._wait_for_next()
-        return self._get_data(skip_tempfile)
+        return self._get_data(want_tempfile)
 
 class SplitterOutput(object):
     def __init__(self, splitter, key):
