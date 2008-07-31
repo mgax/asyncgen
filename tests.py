@@ -1,6 +1,8 @@
 import unittest
+import cPickle
 
-from asyncgen import async, generator_map, generator_splitter
+import asyncgen
+from asyncgen import async, generator_map, generator_splitter, async_log
 
 class SimpleCallsTestCase(unittest.TestCase):
     """
@@ -222,9 +224,6 @@ class PickeTestCase(unittest.TestCase):
     def setUp(self):
         self.pickle_log = []
         
-        import cPickle
-        import asyncgen
-        
         real_dump = cPickle.dump
         def _dump(obj, file):
             self.pickle_log.append('i')
@@ -238,8 +237,6 @@ class PickeTestCase(unittest.TestCase):
         asyncgen.pickle_load = _load
     
     def tearDown(self):
-        import cPickle
-        import asyncgen
         asyncgen.pickle_dump = cPickle.dump
         asyncgen.pickle_load = cPickle.load
     
@@ -359,6 +356,42 @@ class GeneratorSplitterTestCase(unittest.TestCase):
         
         for n in range(3):
             self.failUnlessEqual(list(outs[n]), [n])
+
+class LoggingTestCase(unittest.TestCase):
+    def setUp(self):
+        async_log.enable()
+    
+    def tearDown(self):
+        async_log.reset()
+    
+    def test_log_jobs(self):
+        @async
+        def f():
+            yield 1
+            yield 2
+        
+        self.failUnlessEqual(list(f()), [1, 2])
+        self.failUnlessEqual(len(filter(lambda e: 'worker_startup' in e, async_log.events)), 1)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_job_start' in e, async_log.events)), 3)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_job_done' in e, async_log.events)), 2)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_quit' in e, async_log.events)), 1)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_exception' in e, async_log.events)), 0)
+    
+    def test_log_jobs_with_input(self):
+        @async('i')
+        def f(i):
+            for v in i:
+                yield v
+        
+        self.failUnlessEqual(list(f(i=[1, 2])), [1, 2])
+        self.failUnlessEqual(len(filter(lambda e: 'worker_startup' in e, async_log.events)), 1)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_job_start' in e, async_log.events)), 3)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_job_done' in e, async_log.events)), 2)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_quit' in e, async_log.events)), 1)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_exception' in e, async_log.events)), 0)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_input_request' in e, async_log.events)), 3)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_input_receive' in e, async_log.events)), 2)
+        self.failUnlessEqual(len(filter(lambda e: 'worker_input_exception' in e, async_log.events)), 1)
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,8 +1,37 @@
 import tempfile
 import os
+import sys
 from cPickle import dump as pickle_dump, load as pickle_load
 
 import pprocess
+
+_log = None
+
+class AsyncLog():
+    def __init__(self):
+        self.events = []
+        self.time_base = os.times()[4]
+    
+    def enable(self, to_stderr=False):
+        global _log
+        _log = self
+        self.to_stderr = to_stderr
+    
+    def reset(self):
+        global _log
+        _log = None
+        self.events = []
+        self.time_base = os.times()[4]
+    
+    def add(self, msg):
+        time = int((os.times()[4] - self.time_base) * 1000)
+        log_msg = "[%7d] %s" % (time, msg)
+        self.events.append(log_msg)
+        if self.to_stderr:
+            sys.stderr.write(log_msg + '\n')
+
+async_log = AsyncLog()
+
 
 def _unpickle_and_remove_file(f):
     data = pickle_load(open(f, 'rb'))
@@ -135,8 +164,10 @@ class AsyncJob(object):
         
         for c in range(options['workers']):
             channel = self.launch_worker(func, args, kwargs, input_names)
-            self.idle_workers.insert(0, Worker(channel, self))
+            w = Worker(channel, self)
+            self.idle_workers.insert(0, w)
             self.worker_queue.add(channel)
+            if _log: _log.add('worker_startup %s' % str(w))
     
     def launch_worker(self, func, args, kwargs, input_names):
         channel = _async_process(func, args, kwargs, input_names)
@@ -167,6 +198,7 @@ class AsyncJob(object):
                 worker.send('pull_output_tempfile')
             else:
                 worker.send('pull_output')
+            if _log: _log.add('worker_job_start %s' % str(worker))
         
         if not (self.idle_workers or self.busy_workers or self.ready_data):
             self.stop_iteration = True
@@ -183,24 +215,30 @@ class AsyncJob(object):
                     worker.send(('next_input_tempfile', v))
                 else:
                     worker.send(('next_input', input_source.next()))
+                if _log: _log.add('worker_input_receive %s' % str(worker))
             except Exception, e:
                 worker.send(('exception', e))
+                if _log: _log.add('worker_input_exception %s' % str(worker))
     
     def worker_has_message(self, worker, message):
         t, v = message
         if t == 'pull_input':
             self.workers_waiting_input.insert(0, (worker, v))
+            if _log: _log.add('worker_input_request %s' % str(worker))
         elif t in ('next_value', 'next_value_tempfile'):
             self.ready_data.insert(0, (t, v))
             self.busy_workers.remove(worker)
             self.idle_workers.insert(0, worker)
+            if _log: _log.add('worker_job_done %s' % str(worker))
         elif t == 'stop_iteration':
             worker.send('quit')
             self.busy_workers.remove(worker)
             self.worker_queue.remove(worker.channel)
+            if _log: _log.add('worker_quit %s' % str(worker))
             self.do_pre_poll()
         elif t == 'exception':
             self.ready_data = [('exception', v)]
+            if _log: _log.add('worker_exception %s' % str(worker))
         else:
             raise NotImplementedError('AsyncJob.worker_has_message: message "%s" not implemented' % t)
     
