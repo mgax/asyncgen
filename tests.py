@@ -262,26 +262,22 @@ class GeneratorSplitterTestCase(unittest.TestCase):
             for v in i:
                 yield v
         
-        gs = generator_splitter(src())
+        gs = generator_splitter(src(), [0, 1])
         self.failUnlessEqual(list(dst(i=gs[0])), [1, 2, 3])
         self.failUnlessEqual(list(dst(i=gs[1])), ['a', 'b', 'c'])
     
     def test_dict(self):
-        self.failUnlessEqual(list(generator_splitter([{'a':2}])['a']), [2])
+        self.failUnlessEqual(list(generator_splitter([{'a':2}], ['a'])['a']), [2])
     
     def test_bad_input(self):
-        try:
-            generator_splitter([13])[0].next()
-            self.fail('did not raise ValueError')
-        except ValueError, e:
-            self.failUnless('input received was neither dict nor sequence' in str(e))
+        self.failUnlessRaises(TypeError, lambda: generator_splitter([13], [0])[0].next())
     
     def test_bad_key(self):
         try:
-            generator_splitter([{}])[0].next()
+            generator_splitter([[1]], [0])[1].next()
             self.fail('did not raise KeyError')
         except KeyError, e:
-            self.failUnless('the key you asked for, 0, was not received.' in str(e))
+            self.failUnless('the key you asked for, 1, was not in the list of keys to retrieve' in str(e))
     
     def test_split_async(self):
         import time
@@ -293,8 +289,8 @@ class GeneratorSplitterTestCase(unittest.TestCase):
                 yield
         
         def src():
-            yield (0, 1, 3)
-            yield (4, 1, 0)
+            yield (3, 1, 0)
+            yield (0, 1, 4)
             yield (0, 5, 0)
         
         @async('i', 'l', buffer=1)
@@ -304,12 +300,30 @@ class GeneratorSplitterTestCase(unittest.TestCase):
                 l.next()
             yield
         
-        gs = generator_splitter(src())
-        all_dst = list( dst(i=gs[i], l=log(n)) for i, n in enumerate('abc') )
+        gs = generator_splitter(src(), [0, 1, 2])
+        all_dst = list( dst(i=gs[i], l=log(n)) for i, n in enumerate('cba') )
         for d in all_dst:
             list(d)
         
         self.failUnlessEqual(''.join(event_log), 'abbcccaab')
+    
+    def test_split_premature_stop(self):
+        import time
+        
+        @async
+        def src():
+            time.sleep(.01)
+            yield (0, 1, 2)
+        
+        @async('i', buffer=1)
+        def dst(i):
+            yield i.next()
+        
+        gs = generator_splitter(src(), [0, 1, 2])
+        outs = list( dst(i=gs[n]) for n in range(3) )
+        
+        for n in range(3):
+            self.failUnlessEqual(list(outs[n]), [n])
 
 if __name__ == '__main__':
     unittest.main()

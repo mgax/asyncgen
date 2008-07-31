@@ -163,7 +163,7 @@ class AsyncJob(object):
             try:
                 input_source = self.input[name]
                 if isinstance(input_source, AsyncJob) and input_source.tempfile_output:
-                    v = input_source._get_output(skip_tempfile=True)
+                    v = input_source.next(skip_tempfile=True)
                     worker.send(('next_tempfile', v))
                 else:
                     v = input_source.next()
@@ -192,10 +192,14 @@ class AsyncJob(object):
     def __iter__(self):
         return self
     
-    def _get_output(self, skip_tempfile=False):
+    def _request_data(self):
         self.waiting_data += 1
-        while not (self.ready_data or self.stop_iteration):
+    
+    def _wait_for_next(self, callback=lambda: False):
+        while not (self.ready_data or self.stop_iteration or callback()):
             self.worker_queue.tick()
+    
+    def _get_data(self, skip_tempfile=False):
         self.waiting_data -= 1
         
         if self.stop_iteration:
@@ -213,8 +217,10 @@ class AsyncJob(object):
         else:
             raise NotImplementedError
     
-    def next(self):
-        return self._get_output()
+    def next(self, skip_tempfile=False):
+        self._request_data()
+        self._wait_for_next()
+        return self._get_data(skip_tempfile)
 
 class SplitterOutput(object):
     def __init__(self, splitter, key):
@@ -228,42 +234,47 @@ class SplitterOutput(object):
         return self.splitter._pull(self.key)
 
 class Splitter(object):
-    def __init__(self, input_generator):
+    def __init__(self, input_generator, keys):
         self.input = input_generator.__iter__()
-        self.queues = {}
+        self.queues = dict( (key, []) for key in keys )
+        self.waiting_for_next = False
     
     def get(self, key):
-        if key not in self.queues:
-            self.queues[key] = []
+        if key not in self.queues.keys():
+            raise KeyError('Splitter: the key you asked for, %s, was not in the list of keys to retrieve' % str(key))
         return SplitterOutput(self, key)
     
     def __getitem__(self, key):
         return self.get(key)
     
-    def _push_input_value(self, key, value):
-        if key not in self.queues:
-            self.queues[key] = []
-        self.queues[key].insert(0, value)
-    
     def _pull_input(self):
-        data = self.input.next()
-        if 'keys' in dir(data):
-            keys = data.keys()
-        elif '__len__' in dir(data):
-            keys = range(len(data))
-        else:
-            raise ValueError('Splitter: input received was neither dict nor sequence')
+        if isinstance(self.input, AsyncJob):
+            if not self.waiting_for_next:
+                self.waiting_for_next = True
+                self.input._request_data()
+            
+            self.input._wait_for_next(callback=lambda: not self.waiting_for_next)
+            
+            if self.waiting_for_next:
+                try:
+                    data = self.input._get_data()
+                finally:
+                    self.waiting_for_next = False
+            else:
+                return
         
-        for key in keys:
-            self._push_input_value(key, data[key])
+        else:
+            data = self.input.next()
+        
+        for key, queue in self.queues.iteritems():
+            queue.insert(0, data[key])
     
     def _pull(self, key):
         queue = self.queues[key]
         if not queue:
-            # note: this will raise StopIteration if the source data has run out
             self._pull_input()
         if not queue:
-            raise KeyError('Splitter: the key you asked for, %s, was not received.' % str(key))
+            raise StopIteration
         return queue.pop()
 
 def async(*input_names, **kwargs):
@@ -287,8 +298,8 @@ def async(*input_names, **kwargs):
     else:
         return decorator
 
-def generator_splitter(input_generator):
-    return Splitter(input_generator)
+def generator_splitter(input_generator, keys):
+    return Splitter(input_generator, keys)
 
 def generator_map(func, *inputs):
     generators = list(i.__iter__() for i in inputs)
